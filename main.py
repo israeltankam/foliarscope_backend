@@ -20,7 +20,7 @@ crop = st.selectbox(
     ["wheat", "pea", "potato", "tomato", "barley"],
 )
 
-# CVT parameters - only density slider
+# Voronoi parameters density slider
 density = st.slider(
     "Number of cells:",
     min_value=10,
@@ -29,7 +29,7 @@ density = st.slider(
     step=1
 )
 
-# Constants for CVT parameters
+# Constants for Voronoi parameters
 ITERATIONS = 20
 THINNESS = 0.22
 
@@ -180,6 +180,9 @@ components.html(
       // Clicked cells
       const clicked = new Set();
       
+      // Precompute the area of the entire leaf
+      const totalLeafArea = polygonArea(scaledBoundary);
+      
       // Render function
       function render() {{
         ctx.clearRect(0, 0, width, height);
@@ -226,20 +229,59 @@ components.html(
         return -1;
       }}
       
-      // Calculate selected area percentage
+      // Calculate selected area percentage with single-pass pixel counting
       function calculateSelectedArea() {{
         if (cells.length === 0) return 0;
         
-        // Calculate total leaf area
-        const totalArea = polygonArea(scaledBoundary);
-        let selectedArea = 0;
+        // Create a temporary canvas
+        const tempCanvas = document.createElement('canvas');
+        tempCanvas.width = width;
+        tempCanvas.height = height;
+        const tempCtx = tempCanvas.getContext('2d');
         
-        // Calculate area of selected cells
+        // Draw the entire leaf with background color
+        const leafPathTemp = new Path2D();
+        leafPathTemp.moveTo(...scaledBoundary[0]);
+        scaledBoundary.slice(1).forEach(pt => leafPathTemp.lineTo(...pt));
+        leafPathTemp.closePath();
+        
+        // Fill leaf with background color (light green)
+        tempCtx.fillStyle = leafColor;
+        tempCtx.fill(leafPathTemp);
+        
+        // Fill selected cells with selected color
+        tempCtx.fillStyle = selectedColor;
         clicked.forEach(idx => {{
-          selectedArea += polygonArea(cells[idx]);
+          const cell = cells[idx];
+          const path = new Path2D();
+          path.moveTo(...cell[0]);
+          for (let i = 1; i < cell.length; i++) {{
+            path.lineTo(...cell[i]);
+          }}
+          path.closePath();
+          tempCtx.fill(path);
         }});
         
-        return (selectedArea / totalArea) * 100;
+        // Count selected pixels (red channel > 200)
+        const imageData = tempCtx.getImageData(0, 0, width, height);
+        const data = imageData.data;
+        let selectedPixels = 0;
+        let leafPixels = 0;
+        
+        for (let i = 0; i < data.length; i += 4) {{
+          // Count leaf pixels (anything not background)
+          if (data[i] > 0 || data[i+1] > 0 || data[i+2] > 0) {{
+            leafPixels++;
+          }}
+          
+          // Count selected pixels (red channel dominates)
+          if (data[i] > 200 && data[i+1] < 100 && data[i+2] < 100) {{
+            selectedPixels++;
+          }}
+        }}
+        
+        // Calculate percentage
+        return (selectedPixels / leafPixels) * 100;
       }}
       
       // Click handler
@@ -273,6 +315,7 @@ components.html(
     height=600,
 )
 
+#Bridging JS to Python-Streamlit
 # Listen for bridge updates
 leaf_data = bridge("leaf-bridge", default=None)
 if leaf_data is not None:
@@ -284,7 +327,7 @@ if leaf_data is not None:
 if st.session_state.prev_crop != crop:
     st.session_state.leaf_pct = 0.0
     st.session_state.prev_crop = crop
-    
+
 # Display information
 st.markdown(f"**Selected area:** `{st.session_state.leaf_pct}%` of leaf")
 st.markdown("[Note: Centroidal Voronoi Tessellation, not Delaunay Triangulation]")
