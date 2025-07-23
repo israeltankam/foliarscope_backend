@@ -172,8 +172,8 @@ components.html(
         }});
         
         // Draw grid lines on top
-        ctx.strokeStyle = 'gray';
-        ctx.lineWidth = 0.5;
+        ctx.strokeStyle = 'black';
+        ctx.lineWidth = 0.7;
         ctx.stroke(gridLinesPath);
         
         ctx.restore();
