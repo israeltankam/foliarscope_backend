@@ -1,37 +1,25 @@
 import streamlit as st
 import streamlit.components.v1 as components
 import json
-from st_bridge import bridge
+from st_bridge import bridge  # Import bridge for communication
 
 st.set_page_config(layout="wide")
 st.title("FoliarScope")
 
-# Session state for tracking previous crop
-if 'prev_crop' not in st.session_state:
-    st.session_state.prev_crop = None
-    
 # Session state for percentage
 if 'leaf_pct' not in st.session_state:
     st.session_state.leaf_pct = 0.0
-    
+
 # Select crop
 crop = st.selectbox(
     "Select a crop leaf shape:",
     ["wheat", "pea", "potato", "tomato", "barley"],
 )
 
-# Voronoi parameters density slider
-density = st.slider(
-    "Number of cells:",
-    min_value=10,
-    max_value=200,
-    value=45,
-    step=1
+# Grid resolution slider
+grid_resolution = st.slider(
+    "Grid resolution (square size):", 0.03, 0.3, 0.06, 0.03
 )
-
-# Constants for Voronoi parameters
-ITERATIONS = 20
-THINNESS = 0.22
 
 # Predefined leaf shapes
 LEAF_SHAPES = {
@@ -51,40 +39,22 @@ components.html(
     <!DOCTYPE html>
     <html>
     <head>
-      <title>Centroidal Voronoi Tessellation</title>
-      <script src="https://d3js.org/d3.v7.min.js"></script>
-      <script src="https://unpkg.com/d3-delaunay@6.0.2/dist/d3-delaunay.min.js"></script>
-      <style>
-        body {{ margin: 0; font-family: Arial, sans-serif; }}
-        .container {{ display: flex; flex-direction: column; align-items: center; padding: 10px; }}
-        canvas {{ border: 1px solid #ddd; border-radius: 5px; box-shadow: 0 2px 10px rgba(0,0,0,0.1); }}
-        .info {{ margin-top: 15px; color: #555; font-size: 14px; }}
-      </style>
+      <script src="https://unpkg.com/martinez-polygon-clipping@0.7.0/dist/martinez.umd.js"></script>
     </head>
     <body>
-    <div class="container">
-      <canvas id="leafCanvas" width="500" height="500"></canvas>
-      <div class="info">Click on cells to select/deselect areas</div>
-    </div>
-    
+    <canvas id="leafCanvas" width="500" height="500" style="border:1px solid #ccc"></canvas>
     <script>
-      // Parse boundary and parameters
+      // Parse boundary and grid resolution
       const boundary = {boundary_json};
-      const density = {density};
-      const iterations = {ITERATIONS};  // Constant value
-      const thinness = {THINNESS};      // Constant value
+      const gridResolution = {grid_resolution};
       const canvas = document.getElementById('leafCanvas');
       const ctx = canvas.getContext('2d');
       const width = canvas.width, height = canvas.height;
-      
-      // Colors
-      const leafColor = '#4CAF50';
-      const selectedColor = '#FF5722';
-      const borderColor = 'rgba(255, 255, 255, 0.8)';
-      const boundaryColor = '#2E7D32';
-      
+
       // Build leaf polygon path
       const scaledBoundary = boundary.map(p => [p[0]*width, p[1]*height]);
+      const leafPolygonClosed = [...scaledBoundary, scaledBoundary[0]];
+      
       function createLeafPath() {{
         const path = new Path2D();
         path.moveTo(...scaledBoundary[0]);
@@ -93,198 +63,127 @@ components.html(
         return path;
       }}
       const leafPath = createLeafPath();
-      
-      // Function to calculate polygon area (shoelace formula)
-      function polygonArea(poly) {{
+
+      // Shoelace formula for polygon area
+      function polygonArea(ring) {{
         let area = 0;
-        for (let i=0, n=poly.length; i<n; i++) {{
-          const [x1, y1] = poly[i];
-          const [x2, y2] = poly[(i+1) % n];
-          area += x1*y2 - x2*y1;
-        }}
-        return Math.abs(area)/2;
-      }}
-      
-      // Function to calculate polygon centroid
-      function polygonCentroid(poly) {{
-        let cx = 0, cy = 0;
-        const n = poly.length;
-        const area = polygonArea(poly);
-        if (area === 0) return [0,0];
-        
+        const n = ring.length;
         for (let i=0; i<n; i++) {{
-          const [x1, y1] = poly[i];
-          const [x2, y2] = poly[(i+1) % n];
-          const factor = (x1*y2 - x2*y1);
-          cx += (x1 + x2) * factor;
-          cy += (y1 + y2) * factor;
+          const j = (i+1) % n;
+          area += ring[i][0]*ring[j][1] - ring[j][0]*ring[i][1];
         }}
-        return [cx/(6*area), cy/(6*area)];
+        return Math.abs(area) / 2;
       }}
+
+      // Compute leaf area
+      const totalLeafArea = polygonArea(leafPolygonClosed);
+
+      // Generate grid
+      const gridSize = gridResolution * width;
+      const minX = Math.min(...scaledBoundary.map(p => p[0]));
+      const maxX = Math.max(...scaledBoundary.map(p => p[0]));
+      const minY = Math.min(...scaledBoundary.map(p => p[1]));
+      const maxY = Math.max(...scaledBoundary.map(p => p[1]));
       
-      // Generate initial random points inside the leaf
-      let points = [];
-      while (points.length < density) {{
-        const x = Math.random()*width;
-        const y = Math.random()*height;
-        if (ctx.isPointInPath(leafPath, x, y)) points.push([x, y]);
-      }}
+      const iMin = Math.floor(minX / gridSize);
+      const iMax = Math.ceil(maxX / gridSize);
+      const jMin = Math.floor(minY / gridSize);
+      const jMax = Math.ceil(maxY / gridSize);
       
-      // Relax points to create Centroidal Voronoi Tessellation
-      function relaxPoints() {{
-        // Create Delaunay triangulation
-        const delaunay = d3.Delaunay.from(points);
-        const voronoi = delaunay.voronoi([0, 0, width, height]);
-        
-        // Create new points by moving to centroids
-        const newPoints = [];
-        for (let i = 0; i < points.length; i++) {{
-          const polygon = voronoi.cellPolygon(i);
-          if (!polygon) {{
-            newPoints.push(points[i]);
-            continue;
-          }}
+      const gridCells = [];
+      const gridCellsById = {{}};
+      
+      // Generate grid cells and clip to leaf
+      for (let i = iMin; i < iMax; i++) {{
+        for (let j = jMin; j < jMax; j++) {{
+          const x = i * gridSize;
+          const y = j * gridSize;
           
-          // Calculate centroid
-          const [cx, cy] = polygonCentroid(polygon);
+          // Create square cell
+          const cellPolygon = [
+            [x, y],
+            [x+gridSize, y],
+            [x+gridSize, y+gridSize],
+            [x, y+gridSize],
+            [x, y]  // Close polygon
+          ];
           
-          // Apply thinness control - interpolate between current position and centroid
-          const [px, py] = points[i];
-          const nx = px * thinness + cx * (1 - thinness);
-          const ny = py * thinness + cy * (1 - thinness);
+          // Clip cell to leaf
+          const result = martinez.intersection([cellPolygon], [leafPolygonClosed]);
           
-          // Ensure new point is inside leaf
-          if (ctx.isPointInPath(leafPath, nx, ny)) {{
-            newPoints.push([nx, ny]);
-          }} else {{
-            newPoints.push(points[i]);
+          if (result.length > 0) {{
+            // Calculate area of clipped polygon
+            let cellArea = 0;
+            for (let poly of result) {{
+              for (let ring of poly) {{
+                cellArea += polygonArea(ring);
+              }}
+            }}
+            
+            const id = `${{i}}_${{j}}`;
+            const cell = {{ id, polygon: result, area: cellArea }};
+            gridCells.push(cell);
+            gridCellsById[id] = cell;
           }}
         }}
-        return newPoints;
       }}
-      
-      // Perform relaxation iterations
-      for (let i = 0; i < iterations; i++) {{
-        points = relaxPoints();
+
+      // Create grid lines path
+      function createGridLinesPath() {{
+        const path = new Path2D();
+        // Vertical lines
+        for (let i = iMin; i <= iMax; i++) {{
+          const x = i * gridSize;
+          path.moveTo(x, minY);
+          path.lineTo(x, maxY);
+        }}
+        // Horizontal lines
+        for (let j = jMin; j <= jMax; j++) {{
+          const y = j * gridSize;
+          path.moveTo(minX, y);
+          path.lineTo(maxX, y);
+        }}
+        return path;
       }}
-      
-      // Final Voronoi diagram
-      const delaunay = d3.Delaunay.from(points);
-      const voronoi = delaunay.voronoi([0, 0, width, height]);
-      const cells = [];
-      for (let i = 0; i < points.length; i++) {{
-        const cell = voronoi.cellPolygon(i);
-        if (cell) cells.push(cell);
-      }}
-      
-      // Clicked cells
+      const gridLinesPath = createGridLinesPath();
+
+      // Clickable rendering
       const clicked = new Set();
-      
-      // Precompute the area of the entire leaf
-      const totalLeafArea = polygonArea(scaledBoundary);
-      
-      // Render function
       function render() {{
         ctx.clearRect(0, 0, width, height);
+        ctx.save(); 
+        ctx.clip(leafPath);
         
-        // Draw leaf boundary
-        ctx.strokeStyle = boundaryColor;
+        // Render grid cells
+        gridCells.forEach(cell => {{
+          const path = new Path2D();
+          for (let poly of cell.polygon) {{
+            for (let ring of poly) {{
+              path.moveTo(...ring[0]);
+              for (let k=1; k<ring.length; k++) {{
+                path.lineTo(...ring[k]);
+              }}
+              path.closePath();
+            }}
+          }}
+          
+          ctx.fillStyle = clicked.has(cell.id) ? 'rgba(255, 0, 0, 0.7)' : 'rgba(144, 238, 144, 0.5)';
+          ctx.fill(path);
+        }});
+        
+        // Draw grid lines on top
+        ctx.strokeStyle = 'gray';
+        ctx.lineWidth = 0.5;
+        ctx.stroke(gridLinesPath);
+        
+        ctx.restore();
+        
+        // Draw leaf outline
+        ctx.strokeStyle = 'black';
         ctx.lineWidth = 2;
         ctx.stroke(leafPath);
-        
-        // Draw Voronoi cells
-        ctx.save();
-        ctx.clip(leafPath);
-        cells.forEach((cell, idx) => {{
-          const path = new Path2D();
-          path.moveTo(...cell[0]);
-          for (let i = 1; i < cell.length; i++) {{
-            path.lineTo(...cell[i]);
-          }}
-          path.closePath();
-          
-          ctx.fillStyle = clicked.has(idx) ? selectedColor : leafColor;
-          ctx.fill(path);
-          ctx.strokeStyle = borderColor;
-          ctx.lineWidth = 1;
-          ctx.stroke(path);
-        }});
-        ctx.restore();
       }}
-      
-      // Find which cell contains a point
-      function findCellIndex(x, y) {{
-        for (let i = 0; i < cells.length; i++) {{
-          const path = new Path2D();
-          path.moveTo(...cells[i][0]);
-          for (let j = 1; j < cells[i].length; j++) {{
-            path.lineTo(...cells[i][j]);
-          }}
-          path.closePath();
-          
-          if (ctx.isPointInPath(path, x, y)) {{
-            return i;
-          }}
-        }}
-        return -1;
-      }}
-      
-      // Calculate selected area percentage with single-pass pixel counting
-      function calculateSelectedArea() {{
-        if (cells.length === 0) return 0;
-        
-        // Create a temporary canvas
-        const tempCanvas = document.createElement('canvas');
-        tempCanvas.width = width;
-        tempCanvas.height = height;
-        const tempCtx = tempCanvas.getContext('2d');
-        
-        // Draw the entire leaf with background color
-        const leafPathTemp = new Path2D();
-        leafPathTemp.moveTo(...scaledBoundary[0]);
-        scaledBoundary.slice(1).forEach(pt => leafPathTemp.lineTo(...pt));
-        leafPathTemp.closePath();
-        
-        // Fill leaf with background color (light green)
-        tempCtx.fillStyle = leafColor;
-        tempCtx.fill(leafPathTemp);
-        
-        // Fill selected cells with selected color
-        tempCtx.fillStyle = selectedColor;
-        clicked.forEach(idx => {{
-          const cell = cells[idx];
-          const path = new Path2D();
-          path.moveTo(...cell[0]);
-          for (let i = 1; i < cell.length; i++) {{
-            path.lineTo(...cell[i]);
-          }}
-          path.closePath();
-          tempCtx.fill(path);
-        }});
-        
-        // Count selected pixels (red channel > 200)
-        const imageData = tempCtx.getImageData(0, 0, width, height);
-        const data = imageData.data;
-        let selectedPixels = 0;
-        let leafPixels = 0;
-        
-        for (let i = 0; i < data.length; i += 4) {{
-          // Count leaf pixels (anything not background)
-          if (data[i] > 0 || data[i+1] > 0 || data[i+2] > 0) {{
-            leafPixels++;
-          }}
-          
-          // Count selected pixels (red channel dominates)
-          if (data[i] > 200 && data[i+1] < 100 && data[i+2] < 100) {{
-            selectedPixels++;
-          }}
-        }}
-        
-        // Calculate percentage
-        return (selectedPixels / leafPixels) * 100;
-      }}
-      
-      // Click handler
+
       canvas.addEventListener('click', e => {{
         const rect = canvas.getBoundingClientRect();
         const x = e.clientX - rect.left;
@@ -292,21 +191,31 @@ components.html(
         
         // Only process if inside leaf
         if (ctx.isPointInPath(leafPath, x, y)) {{
-          const idx = findCellIndex(x, y);
-          if (idx !== -1) {{
-            clicked.has(idx) ? clicked.delete(idx) : clicked.add(idx);
+          const i = Math.floor(x / gridSize);
+          const j = Math.floor(y / gridSize);
+          const id = `${{i}}_${{j}}`;
+          
+          if (gridCellsById[id]) {{
+            clicked.has(id) ? clicked.delete(id) : clicked.add(id);
             render();
             
-            // Calculate and send percentage
-            const pct = calculateSelectedArea().toFixed(2);
+            // Compute selected area
+            let selectedArea = 0;
+            clicked.forEach(id => {{
+              selectedArea += gridCellsById[id].area;
+            }});
+            
+            const pct = (selectedArea / totalLeafArea * 100).toFixed(2);
+            
+            // Send to Streamlit via bridge
             if (window.top.stBridges) {{
               window.top.stBridges.send('leaf-bridge', pct);
             }}
           }}
         }}
       }});
-      
-      // Initial render
+
+      // Initial draw
       render();
     </script>
     </body>
@@ -315,7 +224,6 @@ components.html(
     height=600,
 )
 
-#Bridging JS to Python-Streamlit
 # Listen for bridge updates
 leaf_data = bridge("leaf-bridge", default=None)
 if leaf_data is not None:
@@ -323,11 +231,5 @@ if leaf_data is not None:
         st.session_state.leaf_pct = float(leaf_data)
     except Exception:
         pass
-# Reset percentage if crop changed
-if st.session_state.prev_crop != crop:
-    st.session_state.leaf_pct = 0.0
-    st.session_state.prev_crop = crop
 
-# Display information
-st.markdown(f"**Selected area:** `{st.session_state.leaf_pct}%` of leaf")
-st.markdown("[Note: Centroidal Voronoi Tessellation, not Delaunay Triangulation]")
+st.markdown(f"**Selected area:** {st.session_state.leaf_pct}% of leaf")
